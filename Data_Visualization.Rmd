@@ -1,0 +1,282 @@
+---
+title: "Data Visualization"
+author: "Taylor Pearlman"
+date: "December 2, 2015"
+output: html_document
+---
+
+This is the initial data cleaning/prepping and visualization step.
+
+```{r}
+
+#Loading the necessary packages
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(markdown)
+library(stringr)
+library(tidyr)
+library(Amelia)
+library(vcd)
+library(corrgram)
+library(Hmisc)
+library(caret)
+
+
+#Retrieving the data from the github repository
+train.raw <- read.csv(url("https://raw.github.com/tapearlm/Predicting-Titanic-Passenger-Survival/master/train.csv"), na.strings = c("NA", ""))
+
+#Changing variables to desired type
+train.raw$Name <- as.character(train.raw$Name)
+train.raw$Survived<- as.factor(train.raw$Survived)
+train.raw$Pclass <- as.factor(train.raw$Pclass)
+train.raw$PassengerId <- as.factor(train.raw$PassengerId)  
+
+
+```
+
+
+I'll start by looking at what data we have, and what data we're missing. I'll use the missmap function of the Amelia package to visualize this:
+
+```{r}
+missmap(train.raw, main = "Missing Titanic Data", 
+        col=c("red", "beige"), ylabels = NULL, y.at = NULL)
+```
+
+Most of the cabin information is missing, as well as a good deal of the age information. There probably won't be enough cabin information to do anything useful with, but the age information will probably still prove useful. We'll come back to this.
+
+Next, we'll use various methods in the ggplot and vcd packages to explore each variable.
+
+```{r}
+train.raw%>%
+  ggplot() + aes(Survived) + geom_bar(aes(fill = Survived))+ scale_x_discrete(labels = c("Perished", "Survived")) + theme(legend.position="none") + labs(title = "Survival Count", x = "", y = "Count")
+
+
+train.raw%>%
+  ggplot() + aes(Pclass) + geom_bar(aes(fill = Pclass))  + theme(legend.position="none") + labs(title = "Class Distribution", x = "Class", y = "Count")
+
+train.raw%>%
+  ggplot() + aes(Sex) + geom_bar(aes(fill = Sex))  + theme(legend.position="none") + labs(title = "Gender Distribution", x = "Gender", y = "Count")
+
+
+train.raw%>%
+  ggplot() + aes(Age) + geom_histogram(aes(fill = Survived), binwidth = 2) + labs(title = "Age Distribution", x = "Age", y = "Count")
+
+train.raw%>%
+  ggplot() + aes(Fare) + geom_histogram(aes(fill = Fare))  + theme(legend.position="none") + labs(title = "Fare Distribution", x = "Fare", y = "Count")
+
+train.raw%>%
+  ggplot() + aes(Embarked) + geom_bar(aes(fill = Embarked))  + theme(legend.position="none") + labs(title = "Port Embarked From", x = "Port", y = "Count") + scale_x_discrete(labels = c("Cherbourg", "Queenstown", "Southampton", "Unknown"))
+```
+
+
+We can also use mosaic plots to visualize the basic relationships between the variables and survival rates:
+
+```{r}
+mosaicplot(train.raw$Pclass ~ train.raw$Survived, 
+           main="Passenger Fate by Traveling Class", shade=FALSE, 
+           color=TRUE, xlab="Pclass", ylab="Survived")
+
+
+mosaicplot(train.raw$Sex ~ train.raw$Survived, 
+           main="Passenger Fate by Gender", shade=FALSE, color=TRUE, 
+           xlab="Gender", ylab="Survived")
+
+mosaicplot(train.raw$Embarked ~ train.raw$Survived, 
+           main="Passenger Fate by Port of Embarkation",
+           shade=FALSE, color=TRUE, xlab="Embarked", ylab="Survived")
+```
+
+
+```{r}
+corrgram.data <- train.raw
+
+## change features of factor type to numeric type for inclusion on correlogram
+corrgram.data$Survived <- as.numeric(corrgram.data$Survived)
+corrgram.data$Pclass <- as.numeric(corrgram.data$Pclass)
+corrgram.data$Embarked <- revalue(corrgram.data$Embarked, c("C" = 1, "Q" = 2, "S" = 3))
+
+## generate correlogram
+corrgram.vars <- c("Survived", "Pclass", "Sex", "Age", 
+                   "SibSp", "Parch", "Fare", "Embarked")
+corrgram(corrgram.data[,corrgram.vars], order=FALSE, 
+         lower.panel=panel.ellipse, upper.panel=panel.pie, 
+         text.panel=panel.txt, main="Titanic Training Data")
+```
+
+
+```{r}
+train.raw%>%
+  select(Age)%>%
+  summary()
+
+```
+
+That's a lot of NA's. We'll try to fill the missing values in, with the method used by Curt Wehrley in his solution to this problem, found here: (https://github.com/wehrley/wehrley.github.io/blob/master/SOUPTONUTS.md)
+
+The name information contains titles, which provide a decent indicator of age. We can strip the titles from the name field, and use the titles to estimate the missing age information. 
+
+```{r}
+##Copying Curt Wehrley's code
+## function for extracting honorific (i.e. title) from the Name feature
+getTitle <- function(data) {
+  title.dot.start <- regexpr("\\,[A-Z ]{1,20}\\.", data$Name, TRUE)
+  title.comma.end <- title.dot.start + attr(title.dot.start, "match.length")-1
+  data$Title <- substr(data$Name, title.dot.start+2, title.comma.end-1)
+  return (data$Title)
+} 
+
+train.raw$Title <- getTitle(train.raw)
+unique(train.raw$Title)
+```
+
+Let's use the bystats function to see what values are missing:
+
+```{r}
+bystats(train.raw$Age, train.raw$Title)
+
+missingTitles <- c("Dr", "Master", "Mrs", "Miss", "Mr")
+```
+
+
+And then let's replace the missing ages with the mean of the ages of their respective classes
+
+```{r}
+
+getAge <- function(dat, title){
+          medAge <- dat%>%
+                    filter(Title == title)%>%
+                    summarise(median(Age, na.rm = TRUE))%>%
+                    as.numeric()
+          return(medAge)
+}
+
+
+missingAgeData <- train.raw%>%
+                  filter(Title %in% missingTitles)
+
+for (i in 1:length(train.raw[[1]])){
+  if (is.na(train.raw[i,]$Age)){
+    train.raw[i,]$Age <- getAge(missingAgeData, train.raw[i,]$Title)
+  }
+}
+
+
+train.raw$Embarked[which(is.na(train.raw$Embarked))] <- 'S'
+
+getFare <- function(dat, class){
+          medClass <- dat%>%
+                      filter(Pclass == class)%>%
+                      select(Fare)%>%
+                      summarise(median(Fare, na.rm = TRUE))%>%
+                      as.numeric()
+          return(medClass)
+}
+
+
+## impute missings on Fare feature with median fare by Pclass
+train.raw$Fare[ which(train.raw$Fare == 0 )] <- NA
+
+
+for (i in 1:length(train.raw[[1]])){
+  if (is.na(train.raw[i,]$Fare)){
+    k <- train.raw[i,]
+    train.raw[i,]$Fare <- getFare(train.raw, train.raw[i,]$Pclass)
+  }
+}
+
+
+```
+
+
+
+
+It also seems likely that the "protected members" (women and children) survived together, i.e. if little Billy made it into the lifeboat, his sister and mother likely did as well. To look at this, we need to strip out the family name from the name field, and make it it's own variable.
+
+"Protected Class" = Women and Passengers under 16
+
+```{r}
+
+getFamName <- function(data) {
+  pattern <- regex("^(.+?),")
+  data$FamName <- str_extract(data$Name, pattern)%>%
+                  gsub(",", "", .)
+  return(data$FamName)
+} 
+
+train.raw$FamName <- getFamName(train.raw)
+
+getfamSurvival <- function(passenger, data){
+
+   if ((passenger$Age < 16) & (passenger$SibSp > 0)){
+      string <- passenger$FamName
+      
+     sibData <- data%>%
+                 filter((FamName %in% string) & (SibSp == passenger$SibSp))
+      
+      if(1 %in% sibData$Survived){
+        famSurvival <- 1
+      }          
+      else{
+        famSurvival <- 0
+      } 
+   }
+  
+  else if(identical(passenger$Sex, "female") & (passenger$Parch > 0)){
+    string <- passenger$FamName
+    childData <- data%>%
+                  filter((Age <= 16) & (FamName %in% string) & (Parch <= passenger$Parch))
+      
+      if(1 %in% childData$Survived){
+        famSurvival <- 1
+      }          
+      else{
+        famSurvival <- 0
+      } 
+    
+  }
+  
+  else{
+    famSurvival <- 0
+  }
+  
+  return(famSurvival)
+} 
+
+
+train.raw <- train.raw%>%
+             mutate(FamSurvival = 0)
+
+for (i in 1:length(train.raw[[1]])){
+  train.raw[i,]$FamSurvival <- getfamSurvival(train.raw[i,], train.raw)
+  
+}
+
+train <- train.raw
+remove(train.raw)
+remove(missingAgeData)
+```
+
+
+Now for actually doing analysis. First, we'll partition the data using the caret package:
+
+```{r}
+## split training data into train batch and test batch
+set.seed(23)
+training.rows <- createDataPartition(train$Survived, 
+                                     p = 0.8, list = FALSE)
+train.batch <- train[training.rows, ]
+test.batch <- train[-training.rows, ]
+
+```
+
+Basic logistic regression:
+```{r}
+
+Titanic.logit.1 <- glm(Survived ~ Sex + Pclass + Age + FamSurvival + Embarked, 
+                       data = train.batch, family=binomial("logit"))
+Titanic.logit.1
+
+anova(Titanic.logit.1, test="Chisq")
+```
